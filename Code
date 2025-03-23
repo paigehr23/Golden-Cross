@@ -1,0 +1,81 @@
+//+------------------------------------------------------------------+
+//|                      Golden Cross EA for MT5                    |
+//|        Uses 50-period and 200-period Moving Averages            |
+//+------------------------------------------------------------------+
+#include <Trade/Trade.mqh>
+
+CTrade trade;
+
+// Input parameters
+input int Fast_MA_Period = 50;    // Fast Moving Average period
+input int Slow_MA_Period = 200;   // Slow Moving Average period
+input ENUM_MA_METHOD MA_Method = MODE_SMA; // Moving Average method
+input ENUM_TIMEFRAMES Timeframe = PERIOD_M15; // Timeframe
+input double Lot_Size = 0.1;      // Lot size per trade
+input double Stop_Loss = 50;      // Stop loss in points
+input double Take_Profit = 100;   // Take profit in points
+
+// Global variables
+int fast_ma_handle, slow_ma_handle;
+double fast_ma_values[2], slow_ma_values[2];
+
+//+------------------------------------------------------------------+
+//| Expert initialization function                                  |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+    fast_ma_handle = iMA(_Symbol, Timeframe, Fast_MA_Period, 0, MA_Method, PRICE_CLOSE);
+    slow_ma_handle = iMA(_Symbol, Timeframe, Slow_MA_Period, 0, MA_Method, PRICE_CLOSE);
+    
+    if (fast_ma_handle == INVALID_HANDLE || slow_ma_handle == INVALID_HANDLE)
+    {
+        Print("Failed to create MA indicator handles");
+        return INIT_FAILED;
+    }
+    return INIT_SUCCEEDED;
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick function                                            |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    if (CopyBuffer(fast_ma_handle, 0, 0, 2, fast_ma_values) != 2 ||
+        CopyBuffer(slow_ma_handle, 0, 0, 2, slow_ma_values) != 2)
+    {
+        Print("Failed to get MA data");
+        return;
+    }
+    
+    double fast_ma_previous = fast_ma_values[1];
+    double fast_ma_current = fast_ma_values[0];
+    double slow_ma_previous = slow_ma_values[1];
+    double slow_ma_current = slow_ma_values[0];
+    
+    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // Golden Cross: Fast MA crosses above Slow MA -> Buy and close short
+    if (fast_ma_previous < slow_ma_previous && fast_ma_current > slow_ma_current)
+    {
+        trade.PositionClose(Symbol()); // Close any short position
+        trade.Buy(Lot_Size, _Symbol, 0, Stop_Loss * _Point, Take_Profit * _Point);
+        Print("Golden Cross - Buy Order Placed, Short Closed");
+    }
+    
+    // Death Cross: Fast MA crosses below Slow MA -> Sell and close long
+    if (fast_ma_previous > slow_ma_previous && fast_ma_current < slow_ma_current)
+    {
+        trade.PositionClose(Symbol()); // Close any long position
+        trade.Sell(Lot_Size, _Symbol, 0, Stop_Loss * _Point, Take_Profit * _Point);
+        Print("Death Cross - Sell Order Placed, Long Closed");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Expert deinitialization function                                |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+    IndicatorRelease(fast_ma_handle);
+    IndicatorRelease(slow_ma_handle);
+}
