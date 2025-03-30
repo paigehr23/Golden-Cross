@@ -12,10 +12,10 @@ input int Slow_MA_Period = 200;   // Slow Moving Average period
 input ENUM_MA_METHOD MA_Method = MODE_SMA; // Moving Average method
 input ENUM_TIMEFRAMES Timeframe = PERIOD_M15; // Timeframe
 input double Lot_Size = 0.1;      // Lot size per trade
-input double Stop_Loss = 700;     // Stop loss in USD
-input double Take_Profit = 3500;  // Take profit in USD
-input int Shift_Bars = 1;         // Number of bars to wait before opening a trade
-input double Trailing_Stop = 200; // Trailing stop in USD
+input double Stop_Loss = 700;      // Stop loss in dollars
+input double Take_Profit = 3500;   // Take profit in dollars
+input int Shift_Bars = 1; // Number of bars to wait before opening a trade
+input double Trailing_Stop = 200; // Trailing stop in points
 
 // MACD Input Parameters
 input int MACD_Fast = 12;
@@ -61,7 +61,7 @@ void CloseAllPositions()
 }
 
 //+------------------------------------------------------------------+
-//| Function to apply trailing stop in USD                           |
+//| Function to apply trailing stop                                |
 //+------------------------------------------------------------------+
 void ApplyTrailingStop()
 {
@@ -74,17 +74,15 @@ void ApplyTrailingStop()
             double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
             double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
             
-            double trailingStopInPoints = Trailing_Stop / positionPrice * _Point; // Convert trailing stop from USD to points
-            
             if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
             {
-                double new_sl = bid - trailingStopInPoints;
+                double new_sl = bid - (Trailing_Stop * _Point);
                 if (new_sl > sl)
                     trade.PositionModify(PositionGetInteger(POSITION_TICKET), new_sl, PositionGetDouble(POSITION_TP));
             }
             else if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
             {
-                double new_sl = ask + trailingStopInPoints;
+                double new_sl = ask + (Trailing_Stop * _Point);
                 if (new_sl < sl)
                     trade.PositionModify(PositionGetInteger(POSITION_TICKET), new_sl, PositionGetDouble(POSITION_TP));
             }
@@ -113,24 +111,16 @@ void OnTick()
     
     double fast_ma_two_bars_ago = fast_ma_values[2];
     double fast_ma_previous = fast_ma_values[1];
-    double fast_ma_current = fast_ma_values[0];
     double slow_ma_two_bars_ago = slow_ma_values[2];
     double slow_ma_previous = slow_ma_values[1];
-    double slow_ma_current = slow_ma_values[0];
     double macd_two_bars_ago = macd_values[2];
     double macd_previous = macd_values[1];
-    double macd_current = macd_values[0];
     
     double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    
-    // Convert Stop_Loss and Take_Profit from USD to points based on the current price
-    double sl_points = Stop_Loss / price * _Point;
-    double tp_points = Take_Profit / price * _Point;
-    
-    double sl_buy = price - sl_points;
-    double tp_buy = price + tp_points;
-    double sl_sell = price + sl_points;
-    double tp_sell = price - tp_points;
+    double sl_buy = price - (Stop_Loss / _Point);
+    double tp_buy = price + (Take_Profit / _Point);
+    double sl_sell = price + (Stop_Loss / _Point);
+    double tp_sell = price - (Take_Profit / _Point);
     
     bool hasOpenTrade = false;
     for (int i = 0; i < PositionsTotal(); i++)
@@ -142,14 +132,12 @@ void OnTick()
         }
     }
     
-    // Golden Cross: Buy condition
     if (fast_ma_two_bars_ago < slow_ma_two_bars_ago && fast_ma_previous > slow_ma_previous && macd_two_bars_ago < 0 && macd_previous > 0)
     {
         if (hasOpenTrade) CloseAllPositions();
         trade.Buy(Lot_Size, _Symbol, price, sl_buy, tp_buy);
     }
     
-    // Death Cross: Sell condition
     if (fast_ma_two_bars_ago > slow_ma_two_bars_ago && fast_ma_previous < slow_ma_previous && macd_two_bars_ago > 0 && macd_previous < 0)
     {
         if (hasOpenTrade) CloseAllPositions();
@@ -166,3 +154,4 @@ void OnDeinit(const int reason)
     IndicatorRelease(slow_ma_handle);
     IndicatorRelease(macd_handle);
 }
+
