@@ -1,32 +1,55 @@
 //+------------------------------------------------------------------+
-//|                      Golden Cross EA for MT5                    |
-//|        Uses 50-period and 200-period Moving Averages            |
+//|                   Golden Cross EA with Short-Selling            |
+//|            Executes trades at Golden Cross & Death Cross        |
 //+------------------------------------------------------------------+
 #include <Trade/Trade.mqh>
 
 CTrade trade;
 
 // Input parameters
-input int Fast_MA_Period = 50;    // Fast Moving Average period
-input int Slow_MA_Period = 200;   // Slow Moving Average period
-input ENUM_MA_METHOD MA_Method = MODE_SMA; // Moving Average method
-input ENUM_TIMEFRAMES Timeframe = PERIOD_M15; // Timeframe
-input double Lot_Size = 0.1;      // Lot size per trade
-input double Stop_Loss = 700;      // Stop loss in dollars
-input double Take_Profit = 3500;   // Take profit in dollars
-input int Shift_Bars = 1; // Number of bars to wait before opening a trade
-input double Trailing_Stop = 200; // Trailing stop in points
-
-// MACD Input Parameters
-input int MACD_Fast = 12;
-input int MACD_Slow = 26;
-input int MACD_Signal = 9;
+input int Fast_MA_Period = 50;
+input int Slow_MA_Period = 200;
+input ENUM_MA_METHOD MA_Method = MODE_SMA;
+input ENUM_TIMEFRAMES Timeframe = PERIOD_M15;
+input double Lot_Size = 0.1;
+input double Stop_Loss_USD = 700;  // Stop loss in USD
+input double Take_Profit_USD = 3500; // Take profit in USD
+input int Shift_Bars = 1;
+input double Trailing_Stop_USD = 200; // Trailing stop in USD
+input bool Allow_Hedging = false;
 
 // Global variables
-int fast_ma_handle, slow_ma_handle, macd_handle;
-double fast_ma_values[3], slow_ma_values[3], macd_values[3];
+int fast_ma_handle, slow_ma_handle;
+double fast_ma_values[5], slow_ma_values[5];
 static datetime lastBarTime = 0;
-bool hasOpenPosition = false;
+bool isLongPosition = false;
+bool isShortPosition = false;
+static uint last_modification_time = 0;
+
+//+------------------------------------------------------------------+
+//| Function to translate error codes to descriptions                |
+//+------------------------------------------------------------------+
+string ErrorDescription(int error_code)
+{
+    string error_string;
+    
+    switch(error_code)
+    {
+        case 0:     error_string = "No error"; break;
+        case 4107:  error_string = "Invalid price"; break;
+        case 4108:  error_string = "Invalid stop loss"; break;
+        case 4109:  error_string = "Invalid take profit"; break;
+        case 4110:  error_string = "Invalid volume"; break;
+        case 4111:  error_string = "Invalid trade parameters"; break;
+        case 4200:  error_string = "Order already exists"; break;
+        case 4756:  error_string = "Invalid modification parameters"; break;
+        case 10009: error_string = "Not enough money"; break;
+        case 10016: error_string = "Invalid stops"; break;
+        default:    error_string = "Unknown error"; 
+    }
+    
+    return error_string;
+}
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                  |
@@ -35,56 +58,177 @@ int OnInit()
 {
     fast_ma_handle = iMA(_Symbol, Timeframe, Fast_MA_Period, 0, MA_Method, PRICE_CLOSE);
     slow_ma_handle = iMA(_Symbol, Timeframe, Slow_MA_Period, 0, MA_Method, PRICE_CLOSE);
-    macd_handle = iMACD(_Symbol, Timeframe, MACD_Fast, MACD_Slow, MACD_Signal, PRICE_CLOSE);
-    
-    if (fast_ma_handle == INVALID_HANDLE || slow_ma_handle == INVALID_HANDLE || macd_handle == INVALID_HANDLE)
+
+    if (fast_ma_handle == INVALID_HANDLE || slow_ma_handle == INVALID_HANDLE)
     {
         Print("Failed to create indicator handles");
         return INIT_FAILED;
     }
+    
+    // Initialize position status based on existing positions
+    UpdatePositionStatus();
+    Print("Initial position status - Long: ", isLongPosition, " Short: ", isShortPosition);
+    
     return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
-//| Function to close open positions                                |
+//| Expert deinitialization function                                |
 //+------------------------------------------------------------------+
-void CloseAllPositions()
+void OnDeinit(const int reason)
 {
-    for (int i = PositionsTotal() - 1; i >= 0; i--)
-    {
-        if (PositionSelect(i) && PositionGetString(POSITION_SYMBOL) == _Symbol)
-        {
-            ulong ticket = PositionGetInteger(POSITION_TICKET);
-            trade.PositionClose(ticket);
-        }
-    }
+    if (fast_ma_handle != INVALID_HANDLE)
+        IndicatorRelease(fast_ma_handle);
+    if (slow_ma_handle != INVALID_HANDLE)
+        IndicatorRelease(slow_ma_handle);
 }
 
 //+------------------------------------------------------------------+
-//| Function to apply trailing stop                                |
+//| Function to check current position status                       |
 //+------------------------------------------------------------------+
-void ApplyTrailingStop()
+void UpdatePositionStatus()
 {
+    isLongPosition = false;
+    isShortPosition = false;
+    
     for (int i = 0; i < PositionsTotal(); i++)
     {
-        if (PositionSelect(i) && PositionGetString(POSITION_SYMBOL) == _Symbol)
+        ulong ticket = PositionGetTicket(i);
+        if (ticket > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
         {
-            double positionPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-            double sl = PositionGetDouble(POSITION_SL);
-            double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-            double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-            
             if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
             {
-                double new_sl = bid - (Trailing_Stop * _Point);
-                if (new_sl > sl)
-                    trade.PositionModify(PositionGetInteger(POSITION_TICKET), new_sl, PositionGetDouble(POSITION_TP));
+                isLongPosition = true;
+                Print("Found existing long position: ", ticket);
             }
             else if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
             {
-                double new_sl = ask + (Trailing_Stop * _Point);
-                if (new_sl < sl)
-                    trade.PositionModify(PositionGetInteger(POSITION_TICKET), new_sl, PositionGetDouble(POSITION_TP));
+                isShortPosition = true;
+                Print("Found existing short position: ", ticket);
+            }
+        }
+    }
+    
+    Print("Position status updated - Long: ", isLongPosition, " Short: ", isShortPosition);
+}
+
+//+------------------------------------------------------------------+
+//| Function to close positions of a specific type                  |
+//+------------------------------------------------------------------+
+void ClosePositions(ENUM_POSITION_TYPE posType)
+{
+    for (int i = PositionsTotal() - 1; i >= 0; i--)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+            if (PositionGetInteger(POSITION_TYPE) == posType)
+            {
+                if (!trade.PositionClose(ticket))
+                {
+                    Print("Trade closure failed for ticket: ", ticket, 
+                          " Error: ", GetLastError(),
+                          " Description: ", ErrorDescription(GetLastError()));
+                }
+                else
+                {
+                    Print("Successfully closed ", (posType == POSITION_TYPE_BUY ? "LONG" : "SHORT"), " position: ", ticket);
+                }
+            }
+        }
+    }
+    
+    // Update position status after closing positions
+    UpdatePositionStatus();
+}
+
+//+------------------------------------------------------------------+
+//| Calculate USD to points                                         |
+//+------------------------------------------------------------------+
+double USDToPoints(double usd_amount, double lot_size)
+{
+    double tick_value = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tick_size = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    double point_value = tick_value * tick_size / _Point;
+    
+    // Convert USD to points
+    return usd_amount / (point_value * lot_size);
+}
+
+//+------------------------------------------------------------------+
+//| Function to apply trailing stop                                 |
+//+------------------------------------------------------------------+
+void ApplyTrailingStop()
+{
+    double trailing_points = USDToPoints(Trailing_Stop_USD, Lot_Size);
+    
+    for (int i = 0; i < PositionsTotal(); i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket > 0 && PositionGetString(POSITION_SYMBOL) == _Symbol)
+        {
+            // Check if the trade is still open before attempting to modify
+            if (!PositionSelectByTicket(ticket))
+                continue;
+                
+            // Add a delay between modification attempts
+            if (GetTickCount() - last_modification_time < 1000)  // 1 second delay
+                continue;
+            
+            double sl = PositionGetDouble(POSITION_SL);
+            double tp = PositionGetDouble(POSITION_TP);
+            double open_price = PositionGetDouble(POSITION_PRICE_OPEN);
+            
+            // Get current market prices
+            double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+            double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+            
+            // Get minimum stop level in points
+            int min_stop_level = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+            
+            if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+            {
+                double new_sl = bid - trailing_points * _Point;
+                
+                // Ensure new SL respects minimum stop level
+                double min_allowed_sl = bid - min_stop_level * _Point;
+                if (new_sl > min_allowed_sl && new_sl > sl && new_sl > open_price) // Ensure we're in profit
+                {
+                    if (!trade.PositionModify(ticket, new_sl, tp))
+                    {
+                        Print("Trailing stop modification failed for ticket: ", ticket, 
+                              " Error: ", GetLastError(), 
+                              " Description: ", ErrorDescription(GetLastError()),
+                              " New SL: ", new_sl, " Bid: ", bid, " Min allowed: ", min_allowed_sl);
+                    }
+                    else
+                    {
+                        Print("Trailing stop successfully modified for ticket: ", ticket, " New SL: ", new_sl);
+                        last_modification_time = GetTickCount();
+                    }
+                }
+            }
+            else if (PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+            {
+                double new_sl = ask + trailing_points * _Point;
+                
+                // Ensure new SL respects minimum stop level
+                double min_allowed_sl = ask + min_stop_level * _Point;
+                if (new_sl < min_allowed_sl && (new_sl < sl || sl == 0) && new_sl < open_price) // Ensure we're in profit
+                {
+                    if (!trade.PositionModify(ticket, new_sl, tp))
+                    {
+                        Print("Trailing stop modification failed for ticket: ", ticket, 
+                              " Error: ", GetLastError(),
+                              " Description: ", ErrorDescription(GetLastError()),
+                              " New SL: ", new_sl, " Ask: ", ask, " Min allowed: ", min_allowed_sl);
+                    }
+                    else
+                    {
+                        Print("Trailing stop successfully modified for ticket: ", ticket, " New SL: ", new_sl);
+                        last_modification_time = GetTickCount();
+                    }
+                }
             }
         }
     }
@@ -95,63 +239,134 @@ void ApplyTrailingStop()
 //+------------------------------------------------------------------+
 void OnTick()
 {
-    ApplyTrailingStop();
+    // Reset position flags and update at the beginning of each tick
+    isLongPosition = false;
+    isShortPosition = false;
+    UpdatePositionStatus();
     
-    datetime currentBarTime = iTime(_Symbol, Timeframe, Shift_Bars);
-    if (currentBarTime == lastBarTime) return;
+    // Only execute once per bar
+    datetime currentBarTime = iTime(_Symbol, Timeframe, 0);
+    if (currentBarTime == lastBarTime) 
+    {
+        ApplyTrailingStop(); // We still want to apply trailing stops on every tick
+        return;
+    }
     lastBarTime = currentBarTime;
     
-    if (CopyBuffer(fast_ma_handle, 0, 0, 3, fast_ma_values) != 3 ||
-        CopyBuffer(slow_ma_handle, 0, 0, 3, slow_ma_values) != 3 ||
-        CopyBuffer(macd_handle, 2, 0, 3, macd_values) != 3)
+    // Get indicator values
+    if (CopyBuffer(fast_ma_handle, 0, 0, 3, fast_ma_values) <= 0 ||
+        CopyBuffer(slow_ma_handle, 0, 0, 3, slow_ma_values) <= 0)
     {
         Print("Failed to get indicator data");
         return;
     }
     
-    double fast_ma_two_bars_ago = fast_ma_values[2];
-    double fast_ma_previous = fast_ma_values[1];
-    double slow_ma_two_bars_ago = slow_ma_values[2];
-    double slow_ma_previous = slow_ma_values[1];
-    double macd_two_bars_ago = macd_values[2];
-    double macd_previous = macd_values[1];
+    // Get MA values for current and previous bar
+    double fast_ma_current = fast_ma_values[0];
+    double fast_ma_prev = fast_ma_values[1];
+    double slow_ma_current = slow_ma_values[0];
+    double slow_ma_prev = slow_ma_values[1];
     
-    double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    double sl_buy = price - (Stop_Loss / _Point);
-    double tp_buy = price + (Take_Profit / _Point);
-    double sl_sell = price + (Stop_Loss / _Point);
-    double tp_sell = price - (Take_Profit / _Point);
+    // Detect crossovers correctly
+    bool goldenCross = (fast_ma_prev < slow_ma_prev) && (fast_ma_current >= slow_ma_current);
+    bool deathCross = (fast_ma_prev > slow_ma_prev) && (fast_ma_current <= slow_ma_current);
     
-    bool hasOpenTrade = false;
-    for (int i = 0; i < PositionsTotal(); i++)
+    // Debug info
+    Print("Prev Fast MA: ", fast_ma_prev, " Prev Slow MA: ", slow_ma_prev);
+    Print("Fast MA: ", fast_ma_current, " Slow MA: ", slow_ma_current);
+    Print("Golden Cross: ", goldenCross, " Death Cross: ", deathCross);
+    
+    // If no signal, just return
+    if (!goldenCross && !deathCross) return;
+    
+    // Calculate SL and TP in points
+    double sl_points = USDToPoints(Stop_Loss_USD, Lot_Size);
+    double tp_points = USDToPoints(Take_Profit_USD, Lot_Size);
+    
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    
+    // Golden Cross - Buy Signal
+    if (goldenCross)
     {
-        if (PositionSelect(i) && PositionGetString(POSITION_SYMBOL) == _Symbol)
+        Print("Golden Cross detected - Buy Signal");
+        // Close any short positions
+        if (isShortPosition)
         {
-            hasOpenTrade = true;
-            break;
+            Print("Closing Short positions");
+            ClosePositions(POSITION_TYPE_SELL);
+        }
+        
+        Print("isLongPosition status after closing shorts: ", isLongPosition);
+        
+        // Open a long position if we don't have one already
+        if (!isLongPosition)
+        {
+            double sl = ask - sl_points * _Point;
+            double tp = ask + tp_points * _Point;
+            
+            Print("Opening Long position with SL: ", sl, " TP: ", tp);
+            if (!trade.Buy(Lot_Size, _Symbol, 0, sl, tp))
+            {
+                Print("Buy trade failed. Error code: ", GetLastError(), 
+                      " Description: ", ErrorDescription(GetLastError()));
+            }
+            else
+            {
+                Print("Successfully opened long position");
+                if (trade.ResultRetcode() == TRADE_RETCODE_DONE)
+                {
+                    Print("Trade executed successfully. Updating position status.");
+                    isLongPosition = true;
+                    UpdatePositionStatus();
+                }
+            }
+        }
+        else
+        {
+            Print("Not opening long position because isLongPosition = true");
         }
     }
     
-    if (fast_ma_two_bars_ago < slow_ma_two_bars_ago && fast_ma_previous > slow_ma_previous && macd_two_bars_ago < 0 && macd_previous > 0)
+    // Death Cross - Sell Signal
+    if (deathCross)
     {
-        if (hasOpenTrade) CloseAllPositions();
-        trade.Buy(Lot_Size, _Symbol, price, sl_buy, tp_buy);
-    }
-    
-    if (fast_ma_two_bars_ago > slow_ma_two_bars_ago && fast_ma_previous < slow_ma_previous && macd_two_bars_ago > 0 && macd_previous < 0)
-    {
-        if (hasOpenTrade) CloseAllPositions();
-        trade.Sell(Lot_Size, _Symbol, price, sl_sell, tp_sell);
+        Print("Death Cross detected - Sell Signal");
+        // Close any long positions
+        if (isLongPosition)
+        {
+            Print("Closing Long positions");
+            ClosePositions(POSITION_TYPE_BUY);
+        }
+        
+        Print("isShortPosition status after closing longs: ", isShortPosition);
+        
+        // Open a short position if we don't have one already
+        if (!isShortPosition)
+        {
+            double sl = bid + sl_points * _Point;
+            double tp = bid - tp_points * _Point;
+            
+            Print("Opening Short position with SL: ", sl, " TP: ", tp);
+            if (!trade.Sell(Lot_Size, _Symbol, 0, sl, tp))
+            {
+                Print("Sell trade failed. Error code: ", GetLastError(), 
+                      " Description: ", ErrorDescription(GetLastError()));
+            }
+            else
+            {
+                Print("Successfully opened short position");
+                if (trade.ResultRetcode() == TRADE_RETCODE_DONE)
+                {
+                    Print("Trade executed successfully. Updating position status.");
+                    isShortPosition = true;
+                    UpdatePositionStatus();
+                }
+            }
+        }
+        else
+        {
+            Print("Not opening short position because isShortPosition = true");
+        }
     }
 }
-
-//+------------------------------------------------------------------+
-//| Expert deinitialization function                                |
-//+------------------------------------------------------------------+
-void OnDeinit(const int reason)
-{
-    IndicatorRelease(fast_ma_handle);
-    IndicatorRelease(slow_ma_handle);
-    IndicatorRelease(macd_handle);
-}
-
